@@ -982,6 +982,7 @@ func (h *Head) loadMmappedChunks(refSeries map[chunks.HeadSeriesRef]*memSeries) 
 					minTime:    mint,
 					maxTime:    maxt,
 					numSamples: numSamples,
+					encoding:   encoding,
 				})
 				return nil
 			}
@@ -998,6 +999,7 @@ func (h *Head) loadMmappedChunks(refSeries map[chunks.HeadSeriesRef]*memSeries) 
 				minTime:    mint,
 				maxTime:    maxt,
 				numSamples: numSamples,
+				encoding:   encoding,
 			})
 
 			h.updateMinOOOMaxOOOTime(mint, maxt)
@@ -1016,6 +1018,7 @@ func (h *Head) loadMmappedChunks(refSeries map[chunks.HeadSeriesRef]*memSeries) 
 				minTime:    mint,
 				maxTime:    maxt,
 				numSamples: numSamples,
+				encoding:   encoding,
 			})
 			mmappedChunks[seriesRef] = slice
 			return nil
@@ -1035,6 +1038,7 @@ func (h *Head) loadMmappedChunks(refSeries map[chunks.HeadSeriesRef]*memSeries) 
 			minTime:    mint,
 			maxTime:    maxt,
 			numSamples: numSamples,
+			encoding:   encoding,
 		})
 		h.updateMinMaxTime(mint, maxt)
 		if ms.headChunks != nil && maxt >= ms.headChunks.minTime {
@@ -1278,9 +1282,17 @@ func isSeriesWithoutOOO(s *memSeries) bool {
 
 // isStaleSeries reports whether s's most recent in-order sample is a stale-NaN marker.
 func isStaleSeries(s *memSeries) bool {
-	return value.IsStaleNaN(s.lastValue) ||
-		(s.lastHistogramValue != nil && value.IsStaleNaN(s.lastHistogramValue.Sum)) ||
-		(s.lastFloatHistogramValue != nil && value.IsStaleNaN(s.lastFloatHistogramValue.Sum))
+	// Determine staleness from the series' current sample type. lastValue is not
+	// cleared when a histogram is appended, so it must only be consulted when the
+	// most recent sample is a float.
+	switch {
+	case s.lastHistogramValue != nil:
+		return value.IsStaleNaN(s.lastHistogramValue.Sum)
+	case s.lastFloatHistogramValue != nil:
+		return value.IsStaleNaN(s.lastFloatHistogramValue.Sum)
+	default:
+		return value.IsStaleNaN(s.lastValue)
+	}
 }
 
 // truncateStaleSeries removes the provided series as long as they are still stale and
@@ -1882,6 +1894,18 @@ func (h *Head) NumStaleSeries() uint64 {
 	return h.numStaleSeries.Load()
 }
 
+// updateStaleSeriesMetricOnAppend updates the stale-series gauge after an
+// in-order append, given whether the series was stale before the append and
+// whether the just-appended sample is a staleness marker.
+func (h *Head) updateStaleSeriesMetricOnAppend(wasStale, isStale bool) {
+	switch {
+	case !wasStale && isStale:
+		h.numStaleSeries.Inc()
+	case wasStale && !isStale:
+		h.numStaleSeries.Dec()
+	}
+}
+
 var headULID = ulid.MustParse("0000000000XXXXXXXXXXXXHEAD")
 
 // Meta returns meta information about the head.
@@ -2260,9 +2284,7 @@ func (s *stripeSeries) gc(mint int64, minOOOMmapRef chunks.ChunkDiskMapperRef) (
 			defer s.locks[stripe].Unlock()
 		}
 
-		if value.IsStaleNaN(series.lastValue) ||
-			(series.lastHistogramValue != nil && value.IsStaleNaN(series.lastHistogramValue.Sum)) ||
-			(series.lastFloatHistogramValue != nil && value.IsStaleNaN(series.lastFloatHistogramValue.Sum)) {
+		if isStaleSeries(series) {
 			staleSeriesDeleted++
 		}
 
@@ -2362,17 +2384,14 @@ func (h *Head) deleteSeriesByID(refs []chunks.HeadSeriesRef) {
 			}
 		}
 
-		if value.IsStaleNaN(series.lastValue) ||
-			(series.lastHistogramValue != nil && value.IsStaleNaN(series.lastHistogramValue.Sum)) ||
-			(series.lastFloatHistogramValue != nil && value.IsStaleNaN(series.lastFloatHistogramValue.Sum)) {
+		if isStaleSeries(series) {
 			staleSeriesDeleted++
 		}
 
+		headChunkCount := series.headChunkCount.Load()
 		chunksRemoved += len(series.mmappedChunks)
-		if series.headChunks != nil {
-			chunksRemoved += series.headChunks.len()
-		}
-		if series.headChunkCount.Load() >= 2 {
+		chunksRemoved += int(headChunkCount)
+		if headChunkCount >= 2 {
 			h.series.decMmapReady(series.ref)
 		}
 		// Clear to prevent a double-subtraction from the chunksRemoved gauge if
@@ -2436,9 +2455,8 @@ func (s *stripeSeries) gcSeries(seriesRefs []storage.SeriesRef, maxt int64, shou
 			return
 		}
 
-		if series.headChunks != nil {
-			rmChunks += series.headChunks.len()
-		}
+		headChunkCount := series.headChunkCount.Load()
+		rmChunks += int(headChunkCount)
 		rmChunks += len(series.mmappedChunks)
 
 		// The series is gone entirely. We need to keep the series lock
@@ -2447,7 +2465,7 @@ func (s *stripeSeries) gcSeries(seriesRefs []storage.SeriesRef, maxt int64, shou
 		// If we don't hold them all, there's a very small chance that a series receives
 		// samples again while we are half-way into deleting it.
 		stripe := s.refStripe(series.ref)
-		if series.headChunkCount.Load() >= 2 {
+		if headChunkCount >= 2 {
 			s.decMmapReady(series.ref)
 		}
 		if hashShard != stripe {
@@ -2824,6 +2842,7 @@ func (mc *memChunk) len() (count int) {
 
 // collectHeadChunks walks the headChunks linked list once and returns a slice
 // in oldest-first order (matching mmappedChunks ordering).
+// For example, given head{t4} -> t3 -> t2 -> t1 -> t0, it returns [t0, t1, t2, t3, t4].
 // buf must have length 0 but may have non-zero capacity for reuse; the
 // returned slice's tail beyond its length is zeroed, so a reused, shrinking
 // buffer does not pin chunks from a previous, longer collection.
@@ -2854,30 +2873,6 @@ func (mc *memChunk) oldest() (elem *memChunk) {
 	return elem
 }
 
-// atOffset returns a memChunk that's Nth element on the linked list.
-func (mc *memChunk) atOffset(offset int) (elem *memChunk) {
-	if offset == 0 {
-		return mc
-	}
-	if offset == 1 {
-		return mc.prev
-	}
-	if offset < 0 {
-		return nil
-	}
-
-	var i int
-	elem = mc
-	for i < offset {
-		i++
-		elem = elem.prev
-		if elem == nil {
-			break
-		}
-	}
-	return elem
-}
-
 type oooHeadChunk struct {
 	chunk            *OOOChunk
 	minTime, maxTime int64 // can probably be removed and pulled out of the chunk instead
@@ -2901,6 +2896,7 @@ func overlapsClosedInterval(mint1, maxt1, mint2, maxt2 int64) bool {
 type mmappedChunk struct {
 	ref              chunks.ChunkDiskMapperRef
 	numSamples       uint16
+	encoding         chunkenc.Encoding
 	minTime, maxTime int64
 }
 
