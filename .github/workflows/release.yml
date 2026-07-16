@@ -29,13 +29,13 @@ jobs:
     runs-on: "ubuntu-x64"
     steps:
     - name: "pull code to release"
-      uses: "actions/checkout@v4"
+      uses: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" # v7
       with:
         path: "release"
         persist-credentials: false
         repository: "${{ env.RELEASE_REPO }}"
     - name: "pull release library code"
-      uses: "actions/checkout@v4"
+      uses: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" # v7
       with:
         path: "lib"
         persist-credentials: false
@@ -144,7 +144,7 @@ jobs:
     runs-on: "ubuntu-x64"
     steps:
     - name: "pull code to release"
-      uses: "actions/checkout@v4"
+      uses: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" # v7
       with:
         path: "release"
         persist-credentials: false
@@ -219,7 +219,7 @@ jobs:
     runs-on: "ubuntu-x64"
     steps:
     - name: "pull release library code"
-      uses: "actions/checkout@v4"
+      uses: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" # v7
       with:
         path: "lib"
         persist-credentials: false
@@ -264,7 +264,7 @@ jobs:
     runs-on: "ubuntu-x64"
     steps:
     - name: "pull code to release"
-      uses: "actions/checkout@v4"
+      uses: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" # v7
       with:
         path: "release"
         persist-credentials: false
@@ -298,13 +298,13 @@ jobs:
     runs-on: "ubuntu-x64"
     steps:
     - name: "pull code to release"
-      uses: "actions/checkout@v4"
+      uses: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" # v7
       with:
         path: "release"
         persist-credentials: false
         repository: "${{ env.RELEASE_REPO }}"
     - name: "pull release library code"
-      uses: "actions/checkout@v4"
+      uses: "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" # v7
       with:
         path: "lib"
         persist-credentials: false
